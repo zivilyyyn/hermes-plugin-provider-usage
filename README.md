@@ -1,5 +1,7 @@
 # Provider Usage
 
+> **Personal fork notice.** This is a personal fork of [PhoeniXAbhisheK/hermes-plugin-provider-usage](https://github.com/PhoeniXAbhisheK/hermes-plugin-provider-usage). Changes: a DeepSeek spend ledger derived from local balance samples, MiniMax pointed at the `coding_plan/remains` endpoint, status-bar UI refresh, and the removal of the 429 hold logic (deliberate, for a fixed home deployment). Version strings carry a `+james.N` build suffix; installers should pin the commit SHA.
+
 ![Provider Usage banner](media/banner.png)
 
 Per-provider quota and balance readout in the Hermes desktop status bar:
