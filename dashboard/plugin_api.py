@@ -37,25 +37,20 @@ Endpoints hit (GET, machine credentials attached):
 - https://api.kimi.com/coding/v1/usages, https://api.moonshot.ai/v1/users/me/balance
   (then api.moonshot.cn)
 - https://api.z.ai/api/monitor/usage/quota/limit
-- https://api.minimaxi.com/v1/token_plan/remains (CN) or https://api.minimax.io
-  /v1/token_plan/remains (global): M Plan subscription keys are region-bound
+- https://api.minimax.io/v1/api/openplatform/coding_plan/remains
 - https://api.github.com/copilot_internal/user
 
 All provider HTTPS calls use httpx in-process; no subprocesses are spawned.
-
-Rate limits: a provider that answers 429 with ``retry-after`` is paused until then;
-while held, the last reading is served marked ``stale`` and the endpoint is not polled.
 """
 from __future__ import annotations
 
-import copy
 import contextvars
 import json
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import httpx
@@ -64,29 +59,14 @@ from fastapi import APIRouter
 router = APIRouter()
 
 TTL = 300.0
-RATE_LIMIT_DEFAULT = 900.0  # seconds held when a 429 carries no Retry-After
-RATE_LIMIT_MAX = 21600.0  # clamp: never hold a provider longer than six hours
 HOME = Path.home()
 
 _lock = threading.Lock()
 _cache = {"at": 0.0, "payload": None}
-_holds = {}      # provider id -> epoch when a 429 hold expires
-_last_good = {}  # provider id -> last ok payload (served while held)
 
 
 class _Skip(Exception):
     """Provider has no usable credentials -> omitted from the payload."""
-
-
-class _RateLimited(Exception):
-    """Provider answered 429: do not call it again before ``reset_at`` (epoch)."""
-
-    def __init__(self, reset_at):
-        self.reset_at = float(reset_at)
-        super().__init__(
-            "rate limited until "
-            + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.reset_at))
-        )
 
 PROVIDER_META = {
     "opencode-go": {"name": "OpenCode Go", "tag": "Plan"},
@@ -160,31 +140,6 @@ def _secret(*names):
     return None
 
 
-def _iso_epoch(epoch):
-    """Epoch seconds -> the payload's ISO-8601 UTC form."""
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
-
-
-def _retry_after_seconds(value):
-    """Seconds to wait from a Retry-After header (delta-seconds or HTTP-date)."""
-    text = str(value or "").strip()
-    if not text:
-        return RATE_LIMIT_DEFAULT
-    try:
-        return max(60.0, min(RATE_LIMIT_MAX, float(text)))
-    except ValueError:
-        pass
-    try:
-        when = parsedate_to_datetime(text)
-        if when is not None:
-            if when.tzinfo is None:  # RFC 7231 -0000 means UTC, not local time
-                when = when.replace(tzinfo=timezone.utc)
-            return max(60.0, min(RATE_LIMIT_MAX, when.timestamp() - time.time()))
-    except (TypeError, ValueError, OverflowError):
-        pass
-    return RATE_LIMIT_DEFAULT
-
-
 def _iso_dt(dt):
     if isinstance(dt, datetime):
         return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -227,10 +182,6 @@ def _http_json(url, headers, *, timeout=12.0):
             raise PermissionError("HTTP %d: credential rejected or entitlement missing" % resp.status_code)
         if resp.status_code == 404:
             raise FileNotFoundError("HTTP 404: endpoint not offered for this account")
-        if resp.status_code == 429:
-            # Retry-After is seconds or an HTTP-date; hold the provider for that
-            # window instead of polling inside it (each poll refreshes the penalty).
-            raise _RateLimited(time.time() + _retry_after_seconds(resp.headers.get("retry-after")))
         resp.raise_for_status()
         return _decode_json_body(resp)
 
@@ -434,30 +385,6 @@ def fetch_anthropic():
     return {"id": "anthropic", "status": "ok", "windows": windows}
 
 
-def _nous_credit_rows(info):
-    """Money rows for the Nous Portal credit balance (USD), or [] when the
-    account exposes no numeric credit fields.
-
-    Mirrors the amounts Hermes' account-usage snapshot reports in its details:
-    the total usable credits headline first (what the status-bar chip shows),
-    then the top-up / subscription split only when it adds information.
-    """
-    access = getattr(info, "paid_service_access_info", None)
-    if access is None:
-        return []
-    total = _num(getattr(access, "total_usable_credits", None))
-    purchased = _num(getattr(access, "purchased_credits_remaining", None))
-    subscription = _num(getattr(access, "subscription_credits_remaining", None))
-    rows = []
-    if total is not None:
-        rows.append({"label": "Balance", "left": round(total, 2), "cur": "USD"})
-    if purchased is not None and purchased > 0 and (total is None or abs(purchased - total) > 0.005):
-        rows.append({"label": "Top-up credits", "left": round(purchased, 2), "cur": "USD"})
-    if subscription is not None and subscription > 0:
-        rows.append({"label": "Subscription credits", "left": round(subscription, 2), "cur": "USD"})
-    return rows
-
-
 def fetch_nous():
     try:
         from agent.account_usage import build_nous_credits_snapshot
@@ -482,17 +409,9 @@ def fetch_nous():
             "resets_at": _iso_dt(w.reset_at),
             "status": "ok",
         })
-    if windows:
-        return {"id": "nous", "status": "ok", "windows": windows}
-
-    # No subscription percentage window (a free plan, or prepaid top-up
-    # credits only) used to hide the whole card. The Portal still exposes an
-    # absolute credit balance then, so surface it as money rows instead of
-    # dropping the provider.
-    money = _nous_credit_rows(info)
-    if not money:
+    if not windows:
         raise _Skip("nous")
-    return {"id": "nous", "status": "ok", "money": money}
+    return {"id": "nous", "status": "ok", "windows": windows}
 
 
 def fetch_copilot():
@@ -545,6 +464,156 @@ def fetch_copilot():
 # --------------------------------------------------------------------------- #
 
 
+# --------------------------------------------------------------------------- #
+# DeepSeek spend ledger: the provider API exposes a prepaid balance and no
+# usage history, so spend is derived locally from balance samples: persist a
+# sample per fetch, then report baseline_balance - latest_balance per window.
+# Tracking starts with the first sample this code writes; there is nothing to
+# backfill, so a window without a baseline reports amount: null rather than a
+# fabricated number.
+# --------------------------------------------------------------------------- #
+
+_spend_lock = threading.Lock()
+_SPEND_SAMPLE_MIN_GAP = 60.0  # one sample per currency per minute is plenty
+_SPEND_MAX_LINES = 20000
+_SPEND_KEEP_DAYS = 400
+
+
+def _spend_path():
+    override = os.environ.get("PROVIDER_USAGE_DATA_DIR")
+    if override:
+        base = Path(override)
+    else:
+        try:
+            from hermes_constants import get_hermes_home
+            base = get_hermes_home() / "plugin-data" / "provider-usage"
+        except Exception:
+            base = Path.home() / ".hermes" / "plugin-data" / "provider-usage"
+    return base / "deepseek-balance.jsonl"
+
+
+def _spend_read_samples():
+    """Ledger lines as parsed samples; a missing/unreadable file reads as []
+    and malformed lines are skipped instead of raising, so one bad write can
+    never blind every window."""
+    path = _spend_path()
+    samples = []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                t, bal, cur = item.get("t"), item.get("bal"), item.get("cur")
+                if not isinstance(t, (int, float)) or isinstance(t, bool):
+                    continue
+                if not isinstance(bal, (int, float)) or isinstance(bal, bool):
+                    continue
+                samples.append({"t": int(t), "cur": str(cur or "")[:8], "bal": float(bal)})
+    except OSError:
+        return []
+    samples.sort(key=lambda s: s["t"])
+    return samples
+
+
+def _spend_write_samples(path, samples):
+    # Temp file in the same directory + os.replace: readers never observe a
+    # half-written ledger.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        for s in samples:
+            fh.write(json.dumps(s, separators=(",", ":")) + "\n")
+    os.replace(tmp, path)
+
+
+def _spend_record_sample(cur, bal, now):
+    """Append one balance sample unless the newest sample for this currency
+    is fresher than 60 s. Returns the on-disk samples including the one just
+    recorded (or the existing set when the gap guard skipped the write)."""
+    path = _spend_path()
+    with _spend_lock:
+        samples = _spend_read_samples()
+        newest = max((s["t"] for s in samples if s["cur"] == cur), default=None)
+        if newest is not None and now - newest < _SPEND_SAMPLE_MIN_GAP:
+            return samples
+        samples.append({"t": int(now), "cur": cur, "bal": round(float(bal), 4)})
+        try:
+            if len(samples) > _SPEND_MAX_LINES:
+                # prune on write: keep the last 400 days of history
+                cutoff = int(now) - _SPEND_KEEP_DAYS * 86400
+                samples = [s for s in samples if s["t"] >= cutoff]
+            _spend_write_samples(path, samples)
+        except OSError:
+            return _spend_read_samples()
+        return samples
+
+
+def _spend_window_starts(now):
+    """Start of each window in local machine time (epoch seconds)."""
+    lt = time.localtime(now)
+    day = (lt.tm_year, lt.tm_mon, lt.tm_mday)
+    start_today = time.mktime(day + (0, 0, 0, 0, 0, -1))
+    start_week = time.mktime((day[0], day[1], day[2] - lt.tm_wday) + (0, 0, 0, 0, 0, -1))
+    start_month = time.mktime((day[0], day[1], 1) + (0, 0, 0, 0, 0, -1))
+    return [
+        ("1h", "1h", now - 3600),
+        ("today", "Today", start_today),
+        ("week", "This week", start_week),
+        ("month", "This month", start_month),
+    ]
+
+
+def _spend_payload(cur, bal, now):
+    """Spend rows for one currency from the ledger, or None when the ledger
+    carries no samples for it.
+
+    Spend is the sum of the balance DROPS between consecutive samples inside
+    the window, never ``baseline - latest``. A top-up only raises the balance:
+    netting it against the window baseline used to turn every row into a
+    negative delta, which was clamped to 0 and wiped the real spend recorded
+    before the recharge. A rise is money in, so it adds nothing and merely
+    flags the row with ``topup``.
+    """
+    samples = _spend_record_sample(cur, bal, now)
+    mine = [s for s in samples if s["cur"] == cur]
+    if not mine:
+        return None
+
+    def row(key, label, start, require_two=False):
+        # Pairs whose later sample falls inside the window. The pair straddling
+        # the window start is read as "spent since the last reading", which is
+        # bounded by one sampling gap instead of a whole-window baseline.
+        pairs = [(a, b) for a, b in zip(mine, mine[1:]) if b["t"] > start]
+        if not pairs and (require_two or len(mine) < 2):
+            return {"key": key, "label": label, "amount": None, "complete": False}
+        spend = sum(a["bal"] - b["bal"] for a, b in pairs if a["bal"] > b["bal"])
+        entry = {"key": key, "label": label, "amount": round(spend, 2)}
+        if any(b["bal"] > a["bal"] for a, b in pairs):
+            entry["topup"] = True
+        # Tracking covered this window only if a sample predates its start.
+        complete = mine[0]["t"] <= start
+        entry["complete"] = complete
+        if not complete:
+            entry["partial"] = True
+        return entry
+
+    rows = [row(key, label, start) for key, label, start in _spend_window_starts(now)]
+    rows.append(row("total", "Total", mine[0]["t"], require_two=True))
+    first = mine[0]
+    return {
+        "cur": cur,
+        "tracking_since": datetime.fromtimestamp(first["t"]).astimezone().isoformat(timespec="seconds"),
+        "rows": rows,
+    }
+
+
 def fetch_deepseek():
     key = _secret("DEEPSEEK_API_KEY")
     if not key:
@@ -560,7 +629,15 @@ def fetch_deepseek():
         money.append({"label": "Balance", "left": round(total, 2), "cur": str(info.get("currency") or "USD")[:8]})
     if not money:
         raise RuntimeError("DeepSeek returned no balance rows")
-    return {"id": "deepseek", "status": "ok", "money": money}
+    result = {"id": "deepseek", "status": "ok", "money": money}
+    try:
+        spend = _spend_payload(money[0]["cur"], money[0]["left"], time.time())
+        if spend:
+            result["spend"] = spend
+    except Exception:
+        # a broken ledger must never turn DeepSeek into an error row
+        pass
+    return result
 
 
 def _kimi_balance(payload):
@@ -592,8 +669,6 @@ def _fetch_moonshot_balance(headers):
     for url in _MOONSHOT_BALANCE_URLS:
         try:
             payload = _http_json(url, headers)
-        except _RateLimited:
-            raise
         except Exception as exc:
             # 401/403: the key belongs to the other region; 404: the endpoint
             # is not offered there; anything else (transport, non-JSON body)
@@ -620,8 +695,6 @@ def fetch_kimi():
     payload = None
     try:
         payload = _http_json("https://api.kimi.com/coding/v1/usages", headers)
-    except _RateLimited:
-        raise
     except Exception:
         payload = None
     if isinstance(payload, dict):
@@ -635,16 +708,41 @@ def fetch_kimi():
                 "resets_at": usage.get("resetTime") if isinstance(usage.get("resetTime"), str) else None,
                 "status": "ok",
             })
-        for entry in payload.get("limits") or []:
+        for entry in payload.get("limits") or ():
             if not isinstance(entry, dict):
                 continue
+            detail = entry.get("detail") or {}
             percent = _num(entry.get("percentage"))
+            used = _num(detail.get("used"))
+            limit = _num(detail.get("limit"))
+            if percent is None and used is not None and limit:
+                percent = used / limit * 100.0
             if percent is None:
                 continue
+            window = entry.get("window") or {}
+            duration = window.get("duration")
+            unit = str(window.get("timeUnit") or "").replace("TIME_UNIT_", "").lower()
+            label = f"{duration} {unit}" if duration and unit else str(entry.get("name") or "Limit")
             windows.append({
-                "label": str(entry.get("window") or entry.get("name") or "Limit"),
+                "label": label,
                 "percent": round(max(0.0, min(100.0, percent)), 1),
-                "resets_at": entry.get("resetTime") or entry.get("reset_time"),
+                "resets_at": detail.get("resetTime") or entry.get("resetTime") or entry.get("reset_time"),
+                "status": "ok",
+            })
+        usages = payload.get("usages") or {}
+        for key, label in (
+            ("limit_5h", "Session (5h)"),
+            ("limit_month_total", "Monthly total"),
+            ("limit_month_code", "Monthly code"),
+        ):
+            entry = usages.get(key) or {}
+            ratio = _num(entry.get("used_ratio"))
+            if ratio is None:
+                continue
+            windows.append({
+                "label": label,
+                "percent": round(max(0.0, min(100.0, ratio * 100.0)), 1),
+                "resets_at": entry.get("reset_time"),
                 "status": "ok",
             })
         if windows:
@@ -662,21 +760,11 @@ def fetch_zai():
         "https://api.z.ai/api/monitor/usage/quota/limit",
         {"Authorization": "Bearer " + key, "Accept": "application/json"},
     )
-    if not isinstance(payload, dict):
-        raise RuntimeError("Z.AI returned no parseable quota limits")
-    # Z.ai wraps the result in a {code, msg, success, data} envelope and the
-    # quota limits live under data.limits, so reading them off the top level
-    # always found nothing and blanked the card. A bare, unwrapped payload is
-    # still accepted in case the envelope is ever dropped.
-    data = payload.get("data")
-    envelope = data if isinstance(data, dict) else payload
     windows = []
-    for item in envelope.get("limits") or []:
+    for item in payload.get("limits") or []:
         if not isinstance(item, dict):
             continue
         kind = str(item.get("type") or "").upper()
-        unit = item.get("unit")
-        number = _num(item.get("number"))
         percent = _num(item.get("percentage"))
         total, current, usage_value = item.get("total"), item.get("currentValue"), item.get("usage")
         if percent is None:
@@ -689,151 +777,59 @@ def fetch_zai():
             label = "Session (5h)"
         elif kind == "TIME_LIMIT":
             label = "Tool quota"
-        elif unit == 3:
-            # hour-based credit window: the coding plan's rolling session
-            label = "Session (%gh)" % number if number else "Session (5h)"
-        elif unit == 6:
-            # day-based credit window: the coding plan's weekly cap
-            label = "Weekly" if not number or number <= 1 else "Weekly (%gd)" % number
+        elif item.get("unit") == 6:
+            label = "Weekly"
         else:
             label = kind.replace("_", " ").title() or "Limit"
-        # Only some windows carry nextResetTime (the daily one usually does not).
-        resets_at = None
-        reset_ms = item.get("nextResetTime")
-        if isinstance(reset_ms, (int, float)) and reset_ms > 0:
-            resets_at = _iso_epoch(reset_ms / 1000.0)
         windows.append({
             "label": label,
             "percent": round(max(0.0, min(100.0, float(percent))), 1),
-            "resets_at": resets_at,
+            "resets_at": None,
             "status": "ok",
         })
     if not windows:
-        message = payload.get("msg") or payload.get("message")
-        if isinstance(message, str) and message.strip():
-            raise RuntimeError("Z.AI: %s" % message.strip())
         raise RuntimeError("Z.AI returned no parseable quota limits")
     return {"id": "zai", "status": "ok", "windows": windows}
 
 
-MINIMAX_CN_URLS = (
-    "https://api.minimaxi.com/v1/token_plan/remains",
-    "https://www.minimax.cn/v1/token_plan/remains",
-)
-MINIMAX_GLOBAL_URLS = (
-    "https://api.minimax.io/v1/token_plan/remains",
-    "https://www.minimax.io/v1/token_plan/remains",
-)
-
-
-def _minimax_credentials():
-    """MiniMax credentials in probe order, each paired with its host families.
-
-    A mainland key is useless on the intl hosts and the other way round, so
-    every configured credential probes the family matching its region first and
-    the other one second. The CN key is tried before the global one, and both
-    are probed when both are configured.
-    """
-    credentials = []
-    for name, urls in (
-        ("MINIMAX_CN_API_KEY", MINIMAX_CN_URLS + MINIMAX_GLOBAL_URLS),
-        ("MINIMAX_API_KEY", MINIMAX_GLOBAL_URLS + MINIMAX_CN_URLS),
-    ):
-        key = _secret(name)
-        if key and key not in [known for known, _urls in credentials]:
-            credentials.append((key, urls))
-    return credentials
-
-
 def fetch_minimax():
-    """MiniMax plan quota windows, M Plan subscriptions included.
-
-    Subscription keys (the ``sk-cp-`` ones) are region-bound: a mainland key
-    only answers on the CN hosts and a global key only on the intl ones, so
-    each configured credential probes the family matching its region first and
-    the other one second (``MINIMAX_CN_API_KEY`` before ``MINIMAX_API_KEY``).
-    The M Plan meter is percentage based: its ``*_total_count`` fields stay 0
-    and only ``*_remaining_percent`` carries the reading, so a present percent
-    field is authoritative. The count fields are a fallback for payloads
-    without one, where they keep their legacy meaning (used over total).
-    """
-    credentials = _minimax_credentials()
-    if not credentials:
+    key = _secret("MINIMAX_API_KEY")
+    if not key:
         raise _Skip("minimax")
+    headers = {"Authorization": "Bearer " + key, "Accept": "application/json"}
     payload = None
     last_error = None
-    for key, urls in credentials:
-        headers = {"Authorization": "Bearer " + key, "Accept": "application/json"}
-        for url in urls:
-            try:
-                candidate = _http_json(url, headers)
-            except _RateLimited:
-                raise
-            except Exception as exc:
-                last_error = exc
-                continue
-            if isinstance(candidate, dict) and candidate.get("model_remains"):
-                payload = candidate
-                break
-            # A reachable host serving the other region answers 200 with a
-            # base_resp error and no rows: remember it, keep probing.
-            msg = None
-            if isinstance(candidate, dict):
-                msg = (candidate.get("base_resp") or {}).get("status_msg")
-            last_error = RuntimeError(str(msg or "no quota rows"))
-        if payload is not None:
+    for url in (
+        "https://api.minimax.io/v1/api/openplatform/coding_plan/remains",
+        "https://www.minimax.io/v1/api/openplatform/coding_plan/remains",
+    ):
+        try:
+            payload = _http_json(url, headers)
             break
+        except Exception as exc:
+            last_error = exc
     if not isinstance(payload, dict):
         raise RuntimeError("MiniMax quota probe failed: %s" % (last_error or "no endpoint"))
     windows = []
     for row in payload.get("model_remains") or []:
         if not isinstance(row, dict):
             continue
-        model_name = str(row.get("model_name") or "")
-        # The M Plan reports a single aggregate row named "general".
-        prefix = "" if model_name in ("", "general") else model_name[:24] + " · "
-        for total_key, used_key, pct_key, end_key, label in (
-            (
-                "current_interval_total_count",
-                "current_interval_usage_count",
-                "current_interval_remaining_percent",
-                "end_time",
-                "5h",
-            ),
-            (
-                "current_weekly_total_count",
-                "current_weekly_usage_count",
-                "current_weekly_remaining_percent",
-                "weekly_end_time",
-                "weekly",
-            ),
+        model_name = str(row.get("model_name") or "Model")[:24]
+        for total_key, used_key, label in (
+            ("current_interval_total_count", "current_interval_usage_count", "5h"),
+            ("current_weekly_total_count", "current_weekly_usage_count", "weekly"),
         ):
-            # The meter is authoritative when present. On token_plan/remains the
-            # count fields hold quota left (the legacy coding_plan payloads
-            # counted consumed quota), so preferring them would invert the
-            # reading of any payload that carries both.
-            remaining = _num(row.get(pct_key))
-            percent = None
-            if remaining is not None:
-                percent = 100.0 - remaining
-            else:
-                total, used = row.get(total_key), row.get(used_key)
-                if isinstance(total, (int, float)) and total > 0 and isinstance(used, (int, float)):
-                    percent = min(max(used, 0), total) / total * 100.0
-            if percent is None:
-                continue
-            resets_at = None
-            end_ms = row.get(end_key)
-            if isinstance(end_ms, (int, float)) and end_ms > 0:
-                resets_at = _iso_epoch(end_ms / 1000.0)
-            windows.append({
-                "label": prefix + label,
-                "percent": round(max(0.0, min(100.0, float(percent))), 1),
-                "resets_at": resets_at,
-                "status": "ok",
-            })
+            total, used = row.get(total_key), row.get(used_key)
+            if isinstance(total, (int, float)) and total > 0 and isinstance(used, (int, float)):
+                used_clamped = min(max(used, 0), total)
+                windows.append({
+                    "label": "%s · %s" % (model_name, label),
+                    "percent": round(used_clamped / total * 100.0, 1),
+                    "resets_at": None,
+                    "status": "ok",
+                })
     if not windows:
-        raise RuntimeError("MiniMax returned no parseable plan rows")
+        raise RuntimeError("MiniMax returned no parseable coding-plan rows")
     return {"id": "minimax", "status": "ok", "windows": windows}
 
 
@@ -923,49 +919,24 @@ def _decorate(pid, p, now):
 
 
 def _collect():
-    """Collect every provider. Callers hold ``_lock`` (``payload()`` does)."""
     results = {}
-    now = time.time()
-    held = {pid: until for pid, until in _holds.items() if pid in FETCH_ORDER and until > now}
-    to_fetch = [pid for pid in FETCH_ORDER if pid not in held]
     with ThreadPoolExecutor(max_workers=6) as pool:
         # Pool workers do not inherit contextvars; under a multiplexed host the
         # profile secret scope and profile home live in the caller's context,
         # so run every task in a copy of it (the core's tools/daemon_pool.py
         # uses the same pattern).
-        futures = {pool.submit(contextvars.copy_context().run, FETCHERS[pid]): pid for pid in to_fetch}
+        futures = {pool.submit(contextvars.copy_context().run, FETCHERS[pid]): pid for pid in FETCH_ORDER}
         for future in as_completed(futures):
             pid = futures[future]
             try:
                 results[pid] = future.result()
             except _Skip:
-                _holds.pop(pid, None)
-                _last_good.pop(pid, None)
                 continue
-            except _RateLimited as exc:
-                _holds[pid] = exc.reset_at
-                held[pid] = exc.reset_at
             except Exception as exc:  # one provider must never blank the others
                 results[pid] = {"id": pid, "status": "error", "error": str(exc)[:160]}
-            else:
-                _holds.pop(pid, None)
-                _last_good[pid] = copy.deepcopy(results[pid])
-
-    for pid, until in held.items():
-        last = _last_good.get(pid)
-        if last is not None:
-            stale = copy.deepcopy(last)
-            stale["stale"] = True
-            stale["hold_until"] = _iso_epoch(until)
-            results[pid] = stale
-        else:
-            results[pid] = {
-                "id": pid,
-                "status": "error",
-                "error": "rate limited until %s" % time.strftime("%H:%M", time.localtime(until)),
-            }
 
     providers = []
+    now = time.time()
     for pid in FETCH_ORDER:
         p = results.get(pid)
         if p is None:
@@ -973,7 +944,7 @@ def _collect():
         meta = PROVIDER_META[pid]
         p.setdefault("name", meta["name"])
         p.setdefault("tag", meta["tag"])
-        if p.get("status") == "ok" and not p.get("stale"):
+        if p.get("status") == "ok":
             _decorate(pid, p, now)
         providers.append(p)
     return {"fetched_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "providers": providers}
@@ -1000,3 +971,4 @@ def get_usage(fresh: bool = False):
 @router.get("/health")
 def get_health():
     return {"ok": True}
+

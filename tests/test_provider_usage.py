@@ -1,7 +1,11 @@
 """Loader + unit tests for dashboard/plugin_api.py (stdlib unittest only)."""
 import importlib.util
 import json
+import os
+import shutil
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -1041,6 +1045,51 @@ class MinimaxFetcherTest(unittest.TestCase):
         API._http_json = boom
         with self.assertRaises(API._RateLimited):
             API.fetch_minimax()
+
+
+class DeepSeekSpendLedgerTest(unittest.TestCase):
+    """Spend must survive a top-up: it is the sum of balance DROPS per window."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="pu-spend-")
+        self._prev = os.environ.get("PROVIDER_USAGE_DATA_DIR")
+        os.environ["PROVIDER_USAGE_DATA_DIR"] = self.tmp
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("PROVIDER_USAGE_DATA_DIR", None)
+        else:
+            os.environ["PROVIDER_USAGE_DATA_DIR"] = self._prev
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _seed(self, rows):
+        path = API._spend_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            for t, bal in rows:
+                fh.write(json.dumps({"t": int(t), "cur": "CNY", "bal": bal}) + "\n")
+
+    def test_topup_keeps_the_spend_that_preceded_it(self):
+        now = time.time()
+        # 6.00 spent an hour ago, a +100 top-up 17 min ago, then 1.00 more.
+        self._seed([(now - 9000, 10.0), (now - 5400, 4.0), (now - 1000, 104.0), (now - 100, 103.0)])
+        rows = {r["key"]: r for r in API._spend_payload("CNY", 103.0, now)["rows"]}
+        self.assertEqual(rows["1h"]["amount"], 1.0)  # the top-up wiped this to 0 before
+        self.assertTrue(rows["1h"]["topup"])
+        self.assertEqual(rows["total"]["amount"], 7.0)
+        self.assertTrue(rows["total"]["complete"])
+
+    def test_a_rise_never_counts_as_spend(self):
+        now = time.time()
+        self._seed([(now - 20000, 5.0), (now - 19000, 6.0)])
+        rows = {r["key"]: r for r in API._spend_payload("CNY", 6.0, now)["rows"]}
+        self.assertEqual(rows["total"]["amount"], 0.0)
+        self.assertTrue(rows["total"]["topup"])
+
+    def test_no_history_reports_null_never_zero(self):
+        now = time.time()
+        out = API._spend_payload("CNY", 50.0, now)
+        self.assertTrue(all(r["amount"] is None for r in out["rows"]), out["rows"])
 
 
 if __name__ == "__main__":

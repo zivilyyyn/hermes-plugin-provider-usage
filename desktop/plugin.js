@@ -24,7 +24,16 @@
  * `depletes_in_seconds` from observed history; rows show "~2d" when a
  * window would hit 100% before its reset (or a cap depletes soon).
  */
-import { STATUSBAR_AREAS, atom, useQuery, useQueryClient, useValue } from '@hermes/plugin-sdk'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+  STATUSBAR_AREAS,
+  atom,
+  useQuery,
+  useQueryClient,
+  useValue
+} from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import { useEffect, useRef, useState } from 'react'
 
@@ -306,51 +315,139 @@ function BarDetail() {
   return jsx('span', { style: { color: 'var(--ui-text-tertiary)' }, children: parts })
 }
 
-function tipLine(p, mode) {
-  if (p.status !== 'ok') return 'unavailable'
-  const used = mode !== 'remaining'
-  const moneyRows = Array.isArray(p.money) ? p.money : []
-  if (moneyRows.length) {
-    return moneyRows.map(m => {
-      const total = Number(m.total) || 0
-      const left = Number(m.left) || 0
-      const amt = total > 0 ? (used ? Math.max(0, total - left) : left) : left
-      const label = used && total > 0 ? (MONEY_LABEL_USED[m.label] || m.label) : m.label
-      const d = Number(m.depletes_in_seconds)
-      const tag = isFinite(d) && d > 0 ? ' (' + fmtEta(d) + ')' : ''
-      const amount = money(amt, m.cur) + (total > 0 ? '/' + money(total, m.cur) : '')
-      return label + ' ' + amount + tag
-    }).join(' · ')
-  }
-  return (p.windows || []).map(w => {
-    const u = usedPercentOf(w)
-    const e = Number(w.eta_seconds)
-    const tag = isFinite(e) && e > 0 ? ' (' + fmtEta(e) + ')' : ''
-    return w.label + ' ' + pct(used ? u : 100 - u) + tag
-  }).join(' · ')
-}
+/* ---------- bar item: hover-open / click-pin popover ---------- */
 
-function BarTip() {
-  const { data } = useUsage()
-  const mode = useValue($mode)
-  const rows = data && Array.isArray(data.providers) ? data.providers : []
-  return jsxs('div', {
-    style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 235, fontSize: 11, textAlign: 'left' },
-    children: rows.length
-      ? rows.map(p =>
-          jsxs('div', {
-            key: p.id,
-            style: { display: 'flex', justifyContent: 'space-between', gap: 12 },
-            children: [
-              jsx('span', { style: { fontWeight: 600 }, children: p.name }),
-              jsx('span', { style: { opacity: 0.8, fontVariantNumeric: 'tabular-nums' }, children: tipLine(p, mode) })
-            ]
-          })
-        )
-      : [jsx('div', {
-          key: data ? 'empty' : 'load',
-          children: data ? 'Provider usage: no providers available' : 'Provider usage: loading…'
-        })]
+const HOVER_OPEN_MS = 300
+const HOVER_CLOSE_MS = 200
+
+// The chrome the host gives a plain statusbar button (statusbar-controls.tsx
+// STATUSBAR_ACTION_CLASS). These exact utilities are already in the compiled
+// stylesheet because the host's own bar uses them, so the item looks the same
+// as it did as a declarative data contribution.
+const BAR_BUTTON_CLASS =
+  'inline-flex h-full items-center gap-1 rounded-none px-1.5 text-[0.6875rem] text-(--ui-text-tertiary) ' +
+  'transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground'
+
+/* The statusbar item owns its popover instead of the host's menu chrome:
+ * hovering the item opens the very same UsagePanel after a short intent
+ * delay, moving into the panel keeps it open, leaving both closes after a
+ * second delay, and a click pins it open. No `title` is registered anywhere,
+ * so the host never paints its hover tooltip over this item. */
+function BarMenu() {
+  const [open, setOpen] = useState(false)
+  const pinned = useRef(false)
+  const openTimer = useRef(null)
+  const closeTimer = useRef(null)
+
+  const clearTimers = () => {
+    if (openTimer.current !== null) {
+      clearTimeout(openTimer.current)
+      openTimer.current = null
+    }
+    if (closeTimer.current !== null) {
+      clearTimeout(closeTimer.current)
+      closeTimer.current = null
+    }
+  }
+
+  useEffect(() => clearTimers, [])
+
+  const hoverOpen = () => {
+    clearTimers()
+    if (open) return
+    openTimer.current = setTimeout(() => {
+      openTimer.current = null
+      setOpen(true)
+    }, HOVER_OPEN_MS)
+  }
+
+  const hoverClose = () => {
+    clearTimers()
+    if (pinned.current) return
+    closeTimer.current = setTimeout(() => {
+      closeTimer.current = null
+      setOpen(false)
+    }, HOVER_CLOSE_MS)
+  }
+
+  const close = () => {
+    clearTimers()
+    pinned.current = false
+    setOpen(false)
+  }
+
+  /* State is owned here, not by Radix: its own trigger toggle is ignored below
+   * so a hover-opened panel and a click can never fight over `open` inside the
+   * same event. A click pins an un-pinned item (or unpins a pinned one); an
+   * outside press that is not this item, or Escape, closes it. */
+  const onTriggerClick = () => {
+    clearTimers()
+    if (pinned.current) {
+      close()
+      return
+    }
+    pinned.current = true
+    setOpen(true)
+  }
+
+  /* Outside presses are judged here rather than by Radix's own dismissal: the
+   * item and the panel tag themselves, so a press on either is not "outside",
+   * while any other press — the composer included — closes and unpins. */
+  useEffect(() => {
+    if (!open) return undefined
+    const onPointerDown = event => {
+      const target = event.target
+      if (!target || typeof target.closest !== 'function') return
+      if (target.closest('[data-provider-usage-trigger], [data-provider-usage-panel]')) return
+      close()
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    return () => document.removeEventListener('pointerdown', onPointerDown, true)
+  }, [open])
+
+  return jsxs(Popover, {
+    open,
+    // Radix's dismissal requests are answered by the explicit handlers below;
+    // letting it drive `open` too would race the hover timers.
+    onOpenChange: () => {},
+    children: [
+      jsx(PopoverTrigger, {
+        key: 'trigger',
+        asChild: true,
+        children: jsx('button', {
+          type: 'button',
+          className: BAR_BUTTON_CLASS,
+          'aria-label': 'Provider usage',
+          'data-provider-usage-trigger': '',
+          onClick: onTriggerClick,
+          onMouseEnter: hoverOpen,
+          onMouseLeave: hoverClose,
+          children: [
+            ICON,
+            jsx('span', { className: 'truncate text-muted-foreground/80', children: jsx(BarDetail, {}) })
+          ]
+        })
+      }),
+      jsx(PopoverContent, {
+        key: 'content',
+        variant: 'menu',
+        side: 'top',
+        align: 'end',
+        sideOffset: 8,
+        className: 'p-0',
+        'data-provider-usage-panel': '',
+        // Hover-opening must never pull keyboard focus out of the composer.
+        onOpenAutoFocus: event => event.preventDefault(),
+        onEscapeKeyDown: close,
+        onMouseEnter: clearTimers,
+        onMouseLeave: hoverClose,
+        style: {
+          maxHeight: 'min(70vh, var(--radix-popover-content-available-height, 70vh))',
+          overflowY: 'auto'
+        },
+        children: jsx(UsagePanel, {})
+      })
+    ]
   })
 }
 
@@ -428,14 +525,60 @@ function BarToggle({ p, ids }) {
   })
 }
 
+/* DeepSeek spend readouts (1h / today / week / month / total): the backend
+ * derives each window from its balance-sample ledger, so amount is null
+ * until a baseline exists for that window (never a fabricated number). */
+function SpendRows({ spend }) {
+  const rows = spend.rows || []
+  const out = rows.map(row => {
+    const amount = row.amount === null ? '—' : money(row.amount, spend.cur)
+    return jsxs('div', {
+      key: row.key,
+      style: { display: 'flex', alignItems: 'center', gap: 8, padding: '2px 4px' },
+      children: [
+        jsx('span', {
+          style: { width: 72, flex: 'none', fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap' },
+          children: row.label
+        }),
+        jsx('span', { style: { flex: '1 1 auto' } }),
+        jsx('span', {
+          style: { flex: '0 0 auto', textAlign: 'right', fontSize: 12, fontWeight: 600, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
+          children: amount
+        }),
+        jsx('span', {
+          style: { width: 112, flex: 'none', textAlign: 'right', fontSize: 11, opacity: 0.7, whiteSpace: 'nowrap' },
+          children: row.topup ? 'top-up' : ''
+        })
+      ]
+    })
+  })
+  if (rows.some(row => row.partial === true)) {
+    out.push(jsx('div', {
+      key: 'note',
+      style: { padding: '3px 4px 0', fontSize: 11, opacity: 0.5, whiteSpace: 'nowrap' },
+      children: 'counted from ' + trackedFrom(spend.tracking_since)
+    }))
+  }
+  return jsxs('div', {
+    style: { display: 'flex', flexDirection: 'column', marginTop: 1 },
+    children: out
+  })
+}
+
+/* tracking_since is an ISO timestamp; the footnote reads as a clock time on
+ * the same day, otherwise as a short date. */
+function trackedFrom(iso) {
+  const d = iso ? new Date(iso) : null
+  if (!d || isNaN(d.getTime())) return '—'
+  const hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return d.toDateString() === new Date().toDateString() ? hm : d.getMonth() + 1 + '/' + d.getDate() + ' ' + hm
+}
+
 function ProviderBlock({ p, first, mode, ids }) {
   const used = mode === 'used'
   const rows = []
   if (p.status !== 'ok') {
     rows.push(jsx('div', { key: 'err', style: { fontSize: 11, opacity: 0.8 }, children: 'unavailable: ' + (p.error || 'fetch failed') }))
-  }
-  if (p.stale && p.hold_until) {
-    rows.push(jsx('div', { key: 'stale', style: { fontSize: 11, opacity: 0.8 }, children: 'last reading · retry after ' + new Date(p.hold_until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }))
   }
   for (const w of p.windows || []) {
     const usedPct = usedPercentOf(w)
@@ -466,6 +609,9 @@ function ProviderBlock({ p, first, mode, ids }) {
       warn: m.label === 'Key cap' && capUsedPercent(m) >= WARN_PCT,
       eta: aEta ? fmtEta(aEta) : null
     }))
+  }
+  if (p.spend && Array.isArray(p.spend.rows) && p.spend.rows.length) {
+    rows.push(jsx(SpendRows, { key: 'spend', spend: p.spend }))
   }
   return jsxs('div', {
     style: {
@@ -706,15 +852,14 @@ export default {
       id: 'status',
       area: STATUSBAR_AREAS.right,
       order: 40,
+      /* A DATA item that carries its own `render`: the host's statusbar takes
+       * the render path (item.render) for chrome/state/tooltip, while `id` and
+       * `toggleLabel` still ship inside the payload — that is what keeps the
+       * bar's right-click show/hide list (and the saved hidden-id) working.
+       * No `title`, so the host renders no hover tooltip for this item. */
       data: {
         id: 'provider-usage',
-        icon: ICON,
-        detail: jsx(BarDetail, {}),
-        variant: 'menu',
-        menuAlign: 'end',
-        menuClassName: 'w-auto border-(--ui-stroke-secondary) p-0',
-        menuContent: () => jsx(UsagePanel, {}),
-        title: jsx(BarTip, {}),
+        render: () => jsx(BarMenu, {}),
         toggleLabel: 'Provider usage'
       }
     })
