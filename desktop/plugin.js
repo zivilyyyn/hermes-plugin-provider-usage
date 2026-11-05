@@ -6,18 +6,16 @@
  * so provider credentials stay on the local machine.
  *
  * Each provider header carries an eye toggle that shows/hides that provider
- * in the status bar; until one is touched, only the first provider shows.
+ * in the status bar; until one is touched, every provider shows.
  *
- * Registered as a DATA contribution (no custom `render`), so the whole
- * `data` object is the StatusbarItem and the host keeps `toggleLabel` for
- * the right-click show/hide list. `variant: 'menu'` opens `menuContent`
- * through the host's native menu chrome: dense per-provider rows, a
- * Used/Remaining value selector (bottom-right, instant) and a
- * refresh-interval picker (30s/1m/5m/10m).
+ * Registered as a DATA contribution, so the app renders it with the exact
+ * same chrome as the core context-usage gauge; `variant: 'menu'` opens the
+ * popover: dense per-provider rows, a Used/Remaining value selector
+ * (bottom-right, instant) and a refresh-interval picker (30s/1m/5m/10m).
  * Every scheduled poll refreshes the underlying values (?fresh=1).
  *
  * Near-limit tint: any window or the OpenRouter key cap at >= 80% used
- * renders amber in the popover rows.
+ * renders amber in the bar and in the popover rows.
  *
  * Native notification (ctx.os.notify) fires once per threshold crossing,
  * deduped per window cycle (keyed by reset time) and per day for the cap.
@@ -27,6 +25,9 @@
  * window would hit 100% before its reset (or a cap depletes soon).
  */
 import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
   STATUSBAR_AREAS,
   atom,
   useQuery,
@@ -50,8 +51,8 @@ const INTERVALS = [
  * (namespaced under hermes.plugin.provider-usage.*) so they survive restarts. */
 const $interval = atom(300000)
 const $mode = atom('used') // 'used' | 'remaining'
-/* Which providers appear in the status bar. null = default (first provider
- * only); an array of ids = an explicit choice from the panel's eye toggles. */
+/* Which providers appear in the status bar. null = default (every provider);
+ * an array of ids = an explicit choice from the panel's eye toggles. */
 const $barProviders = atom(null)
 
 const STORE_INTERVAL = 'intervalMs'
@@ -165,17 +166,17 @@ function providerWarn(p) {
   return false
 }
 
-/* Bar visibility: default is the FIRST provider only (provider list order);
- * once the user touches a toggle, an explicit id list decides. */
+/* Bar visibility: all providers show by default (provider list order); once
+ * the user touches a toggle, an explicit id list decides. */
 function barVisible(set, id, ids) {
   if (!Array.isArray(ids)) return false
-  if (set === null) return ids.length > 0 && ids[0] === id
+  if (set === null) return ids.indexOf(id) !== -1
   return set.indexOf(id) !== -1
 }
 
 function toggleBarProvider(id, ids) {
   const cur = $barProviders.get()
-  const effective = cur === null ? (ids.length ? [ids[0]] : []) : cur.slice()
+  const effective = cur === null ? ids.slice() : cur.slice()
   const next = effective.indexOf(id) === -1 ? effective.concat([id]) : effective.filter(x => x !== id)
   $barProviders.set(next)
 }
@@ -283,35 +284,208 @@ function summary(p, mode) {
   return Math.round(used ? u : 100 - u) + '%'
 }
 
+/* ---------- bar item (live) ---------- */
+
+function BarDetail() {
+  const { data, isError } = useUsage()
+  const mode = useValue($mode)
+  const barSet = useValue($barProviders)
+
+  useEffect(() => {
+    if (data) checkAlerts(data)
+  }, [data])
+
+  if (isError) return 'backend down'
+  if (!data) return '…'
+  const provs = data.providers || []
+  const visible = barSet === null
+    ? provs
+    : provs.filter(p => barSet.indexOf(p.id) !== -1)
+  const parts = []
+  visible.forEach((p, i) => {
+    if (i) parts.push(' · ')
+    parts.push(jsx('span', {
+      key: p.id,
+      className: providerWarn(p) ? 'text-amber-600' : undefined,
+      children: code(p) + ' ' + summary(p, mode)
+    }))
+  })
+  // The host renders plugin detail content in text-muted-foreground/80 (a
+  // double-dimmed tone); force the same token built-in statusbar values use.
+  return jsx('span', { style: { color: 'var(--ui-text-tertiary)' }, children: parts })
+}
+
+/* ---------- bar item: hover-open / click-pin popover ---------- */
+
+const HOVER_OPEN_MS = 300
+const HOVER_CLOSE_MS = 200
+
+// The chrome the host gives a plain statusbar button (statusbar-controls.tsx
+// STATUSBAR_ACTION_CLASS). These exact utilities are already in the compiled
+// stylesheet because the host's own bar uses them, so the item looks the same
+// as it did as a declarative data contribution.
+const BAR_BUTTON_CLASS =
+  'inline-flex h-full items-center gap-1 rounded-none px-1.5 text-[0.6875rem] text-(--ui-text-tertiary) ' +
+  'transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground'
+
+/* The statusbar item owns its popover instead of the host's menu chrome:
+ * hovering the item opens the very same UsagePanel after a short intent
+ * delay, moving into the panel keeps it open, leaving both closes after a
+ * second delay, and a click pins it open. No `title` is registered anywhere,
+ * so the host never paints its hover tooltip over this item. */
+function BarMenu() {
+  const [open, setOpen] = useState(false)
+  const pinned = useRef(false)
+  const openTimer = useRef(null)
+  const closeTimer = useRef(null)
+
+  const clearTimers = () => {
+    if (openTimer.current !== null) {
+      clearTimeout(openTimer.current)
+      openTimer.current = null
+    }
+    if (closeTimer.current !== null) {
+      clearTimeout(closeTimer.current)
+      closeTimer.current = null
+    }
+  }
+
+  useEffect(() => clearTimers, [])
+
+  const hoverOpen = () => {
+    clearTimers()
+    if (open) return
+    openTimer.current = setTimeout(() => {
+      openTimer.current = null
+      setOpen(true)
+    }, HOVER_OPEN_MS)
+  }
+
+  const hoverClose = () => {
+    clearTimers()
+    if (pinned.current) return
+    closeTimer.current = setTimeout(() => {
+      closeTimer.current = null
+      setOpen(false)
+    }, HOVER_CLOSE_MS)
+  }
+
+  const close = () => {
+    clearTimers()
+    pinned.current = false
+    setOpen(false)
+  }
+
+  /* State is owned here, not by Radix: its own trigger toggle is ignored below
+   * so a hover-opened panel and a click can never fight over `open` inside the
+   * same event. A click pins an un-pinned item (or unpins a pinned one); an
+   * outside press that is not this item, or Escape, closes it. */
+  const onTriggerClick = () => {
+    clearTimers()
+    if (pinned.current) {
+      close()
+      return
+    }
+    pinned.current = true
+    setOpen(true)
+  }
+
+  /* Outside presses are judged here rather than by Radix's own dismissal: the
+   * item and the panel tag themselves, so a press on either is not "outside",
+   * while any other press — the composer included — closes and unpins. */
+  useEffect(() => {
+    if (!open) return undefined
+    const onPointerDown = event => {
+      const target = event.target
+      if (!target || typeof target.closest !== 'function') return
+      if (target.closest('[data-provider-usage-trigger], [data-provider-usage-panel]')) return
+      close()
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    return () => document.removeEventListener('pointerdown', onPointerDown, true)
+  }, [open])
+
+  return jsxs(Popover, {
+    open,
+    // Radix's dismissal requests are answered by the explicit handlers below;
+    // letting it drive `open` too would race the hover timers.
+    onOpenChange: () => {},
+    children: [
+      jsx(PopoverTrigger, {
+        key: 'trigger',
+        asChild: true,
+        children: jsx('button', {
+          type: 'button',
+          className: BAR_BUTTON_CLASS,
+          'aria-label': 'Provider usage',
+          'data-provider-usage-trigger': '',
+          onClick: onTriggerClick,
+          onMouseEnter: hoverOpen,
+          onMouseLeave: hoverClose,
+          children: [
+            ICON,
+            jsx('span', { className: 'truncate text-muted-foreground/80', children: jsx(BarDetail, {}) })
+          ]
+        })
+      }),
+      jsx(PopoverContent, {
+        key: 'content',
+        variant: 'menu',
+        side: 'top',
+        align: 'end',
+        sideOffset: 8,
+        className: 'p-0',
+        'data-provider-usage-panel': '',
+        // Hover-opening must never pull keyboard focus out of the composer.
+        onOpenAutoFocus: event => event.preventDefault(),
+        onEscapeKeyDown: close,
+        onMouseEnter: clearTimers,
+        onMouseLeave: hoverClose,
+        style: {
+          maxHeight: 'min(70vh, var(--radix-popover-content-available-height, 70vh))',
+          overflowY: 'auto'
+        },
+        children: jsx(UsagePanel, {})
+      })
+    ]
+  })
+}
+
 /* ---------- popover panel ---------- */
 
 const MONO = 'tabular-nums'
 
-function Row({ label, value, width, meta, warn, eta }) {
-  const raw = Number(width)
+/* One grid shared by quota windows and spend rows:
+ * [label 96px] [flex bar] [value 72px] [meta 76px]. Fixed columns keep the
+ * left labels, right numbers and reset notes aligned across every provider. */
+function UsageRow({ label, value, meta, barWidth, warn, eta }) {
+  const raw = Number(barWidth)
   const w = isFinite(raw) && raw > 0 ? Math.max(3, Math.min(100, raw)) : 0
   return jsxs('div', {
-    style: { display: 'flex', alignItems: 'center', gap: 8, padding: '2px 4px', margin: '0 -4px', borderRadius: 5 },
+    style: { display: 'flex', alignItems: 'center', gap: 4, minWidth: 0, flexWrap: 'nowrap', padding: 0 },
     children: [
       jsx('span', {
-        style: { width: 72, flex: 'none', fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+        style: { flex: '0 0 96px', textAlign: 'left', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: 12, opacity: 0.75 },
         children: label
       }),
       jsx('span', {
-        style: { flex: '1 1 auto', height: 3, borderRadius: 3, background: 'var(--ui-stroke-tertiary, rgba(128,132,144,.25))', overflow: 'hidden' },
+        style: { flex: '1 1 auto', minWidth: 0 },
         children: w > 0
           ? jsx('span', {
-              style: { display: 'block', height: '100%', width: w + '%', borderRadius: 3, background: 'var(--ui-accent, #6f9dff)', opacity: 0.9 }
+              style: { display: 'block', height: 3, borderRadius: 3, background: 'var(--ui-stroke-tertiary, rgba(128,132,144,.25))', overflow: 'hidden' },
+              children: jsx('span', {
+                style: { display: 'block', height: '100%', width: w + '%', borderRadius: 3, background: 'var(--ui-accent, #6f9dff)', opacity: 0.9 }
+              })
             })
           : null
       }),
       jsx('span', {
-        style: { width: 48, flex: 'none', textAlign: 'right', fontWeight: 600, fontSize: 12, fontVariantNumeric: MONO },
+        style: { flex: '0 0 72px', textAlign: 'right', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums', fontWeight: 600, fontSize: 12 },
         className: warn ? 'text-amber-600' : undefined,
         children: value
       }),
       jsx('span', {
-        style: { width: 112, flex: 'none', textAlign: 'right', fontSize: 11, opacity: 0.7, fontVariantNumeric: MONO, whiteSpace: 'nowrap' },
+        style: { flex: '0 0 76px', textAlign: 'right', whiteSpace: 'nowrap', fontSize: 11, opacity: 0.6, fontVariantNumeric: 'tabular-nums' },
         children: eta
           ? [meta, jsx('span', { key: 'eta', className: 'text-amber-600', style: { marginLeft: 4 }, children: eta })]
           : meta
@@ -364,35 +538,23 @@ function SpendRows({ spend }) {
   const rows = spend.rows || []
   const out = rows.map(row => {
     const amount = row.amount === null ? '—' : money(row.amount, spend.cur)
-    return jsxs('div', {
+    return jsx(UsageRow, {
       key: row.key,
-      style: { display: 'flex', alignItems: 'center', gap: 8, padding: '2px 4px' },
-      children: [
-        jsx('span', {
-          style: { width: 72, flex: 'none', fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap' },
-          children: row.label
-        }),
-        jsx('span', { style: { flex: '1 1 auto' } }),
-        jsx('span', {
-          style: { flex: '0 0 auto', textAlign: 'right', fontSize: 12, fontWeight: 600, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
-          children: amount
-        }),
-        jsx('span', {
-          style: { width: 112, flex: 'none', textAlign: 'right', fontSize: 11, opacity: 0.7, whiteSpace: 'nowrap' },
-          children: row.topup ? 'top-up' : ''
-        })
-      ]
+      label: row.label,
+      value: amount,
+      meta: row.topup ? 'top-up' : '',
+      barWidth: 0
     })
   })
   if (rows.some(row => row.partial === true)) {
     out.push(jsx('div', {
       key: 'note',
-      style: { padding: '3px 4px 0', fontSize: 11, opacity: 0.5, whiteSpace: 'nowrap' },
+      style: { padding: '3px 0 0', fontSize: 11, opacity: 0.5, whiteSpace: 'nowrap' },
       children: 'counted from ' + trackedFrom(spend.tracking_since)
     }))
   }
   return jsxs('div', {
-    style: { display: 'flex', flexDirection: 'column', marginTop: 1 },
+    style: { display: 'flex', flexDirection: 'column', gap: 4 },
     children: out
   })
 }
@@ -416,11 +578,11 @@ function ProviderBlock({ p, first, mode, ids }) {
     const usedPct = usedPercentOf(w)
     const shown = used ? usedPct : 100 - usedPct
     const aEta = actionableEta(w)
-    rows.push(jsx(Row, {
+    rows.push(jsx(UsageRow, {
       key: 'w' + w.label,
       label: w.label,
       value: pct(shown),
-      width: shown,
+      barWidth: shown,
       meta: etaText(w.resets_at),
       warn: usedPct >= WARN_PCT,
       eta: aEta ? fmtEta(aEta) : null
@@ -432,11 +594,11 @@ function ProviderBlock({ p, first, mode, ids }) {
     const shown = total > 0 ? (used ? Math.max(0, total - left) : left) : left
     const d = Number(m.depletes_in_seconds)
     const aEta = isFinite(d) && d > 0 && d < 14 * 86400 ? d : null
-    rows.push(jsx(Row, {
+    rows.push(jsx(UsageRow, {
       key: 'm' + m.label,
       label: used && total > 0 ? (MONEY_LABEL_USED[m.label] || m.label) : m.label,
       value: money(shown, m.cur),
-      width: total > 0 ? (shown / total) * 100 : 0,
+      barWidth: total > 0 ? (shown / total) * 100 : 0,
       meta: total > 0 ? '/ ' + money(total, m.cur) : '',
       warn: m.label === 'Key cap' && capUsedPercent(m) >= WARN_PCT,
       eta: aEta ? fmtEta(aEta) : null
@@ -447,22 +609,22 @@ function ProviderBlock({ p, first, mode, ids }) {
   }
   return jsxs('div', {
     style: {
-      display: 'flex', flexDirection: 'column', gap: 3,
+      display: 'flex', flexDirection: 'column', gap: 4,
       borderTop: first ? 'none' : '1px solid var(--ui-stroke-tertiary, #3a3f4a)',
       paddingTop: first ? 0 : 6
     },
     children: [
       jsxs('div', {
-        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 1 },
+        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 4, minWidth: 0, flexWrap: 'nowrap', padding: 0 },
         children: [
           jsxs('span', {
-            style: { display: 'inline-flex', alignItems: 'center', gap: 1 },
+            style: { display: 'inline-flex', alignItems: 'center', gap: 1, minWidth: 0, flexShrink: 1 },
             children: [
               jsx(BarToggle, { p, ids }),
-              jsx('span', { style: { fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.75 }, children: p.name })
+              jsx('span', { style: { minWidth: 0, textAlign: 'left', fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.75, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, children: p.name })
             ]
           }),
-          jsx('span', { style: { fontSize: 11, opacity: 0.6 }, children: p.tag || '' })
+          jsx('span', { style: { textAlign: 'right', fontSize: 11, opacity: 0.6, flexShrink: 0, whiteSpace: 'nowrap' }, children: p.tag || '' })
         ]
       }),
       ...rows
@@ -512,15 +674,15 @@ function IntervalSelect({ onChanged }) {
 
   return jsxs('span', {
     ref: wrapRef,
-    style: { position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 5 },
+    style: { position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 5, minWidth: 0, flexShrink: 1 },
     children: [
-      jsx('span', { style: { opacity: 0.7 }, children: 'auto refresh' }),
+      jsx('span', { style: { opacity: 0.7, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, children: 'auto refresh' }),
       jsxs('button', {
         type: 'button',
         onClick: () => setOpen(v => !v),
         title: 'Refresh interval',
         style: {
-          display: 'inline-flex', alignItems: 'center', gap: 3, padding: '1px 6px', fontSize: 11, lineHeight: '16px',
+          display: 'inline-flex', alignItems: 'center', gap: 3, padding: '1px 6px', fontSize: 11, lineHeight: '16px', flexShrink: 0,
           border: '1px solid var(--ui-stroke-tertiary, #3a3f4a)', borderRadius: 5, background: 'transparent',
           color: 'inherit', cursor: 'pointer'
         },
@@ -571,10 +733,6 @@ function UsagePanel() {
   const mode = useValue($mode)
   const [spinning, setSpinning] = useState(false)
 
-  useEffect(() => {
-    if (data) checkAlerts(data)
-  }, [data])
-
   const refresh = () => {
     if (spinning) return
     setSpinning(true)
@@ -601,18 +759,18 @@ function UsagePanel() {
   }
 
   return jsxs('div', {
-    style: { display: 'flex', width: 320, flexDirection: 'column', gap: 9, padding: '11px 12px 10px', fontSize: 12 },
+    style: { display: 'flex', width: '100%', maxWidth: 460, boxSizing: 'border-box', flexDirection: 'column', gap: 9, padding: '11px 12px 10px', fontSize: 12 },
     children: [
       jsx('style', { key: 'kf', children: '@keyframes hermes-usage-spin{to{transform:rotate(360deg)}}' }),
       jsxs('div', {
         key: 'head',
-        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, minWidth: 0, flexWrap: 'nowrap' },
         children: [
-          jsx('span', { style: { fontSize: 12, fontWeight: 650 }, children: 'Provider Usage' }),
+          jsx('span', { style: { fontSize: 12, fontWeight: 650, flexShrink: 0, whiteSpace: 'nowrap' }, children: 'Provider Usage' }),
           jsxs('span', {
-            style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, opacity: 0.75 },
+            style: { display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0, flexShrink: 1, fontSize: 11, opacity: 0.75 },
             children: [
-              jsx('span', { style: { fontVariantNumeric: MONO }, children: stamp }),
+              jsx('span', { style: { minWidth: 0, fontVariantNumeric: MONO, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, children: stamp }),
               jsx('button', {
                 type: 'button',
                 onClick: refresh,
@@ -643,7 +801,7 @@ function UsagePanel() {
       jsxs('div', {
         key: 'foot',
         style: {
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, minWidth: 0, flexWrap: 'nowrap',
           borderTop: '1px solid var(--ui-stroke-tertiary, #3a3f4a)', paddingTop: 6, fontSize: 11
         },
         children: [
@@ -656,6 +814,17 @@ function UsagePanel() {
 }
 
 /* ---------- registration ---------- */
+
+const ICON = jsx('svg', {
+  viewBox: '0 0 24 24',
+  fill: 'none',
+  stroke: 'currentColor',
+  strokeWidth: 2,
+  strokeLinecap: 'round',
+  strokeLinejoin: 'round',
+  style: { width: 12, height: 12, display: 'block' },
+  children: [jsx('path', { d: 'm12 14 4-4' }), jsx('path', { d: 'M3.34 19a10 10 0 1 1 17.32 0' })]
+})
 
 export default {
   id: 'provider-usage',
@@ -677,14 +846,19 @@ export default {
       id: 'provider-usage-status',
       area: STATUSBAR_AREAS.right,
       order: 40,
-      /* DATA contribution: the whole `data` object is the StatusbarItem, so
-       * the host renders its native chrome/menu and keeps `toggleLabel` for
-       * the right-click show/hide list. `variant: 'menu'` opens `menuContent`
-       * (the existing UsagePanel); no custom `render` is supplied. */
+      /* A DATA item: the host renders the native statusbar chrome/menu and
+       * keeps `toggleLabel` for the right-click show/hide list. `label` keeps
+       * the live KIMI 5h / DeepSeek balance text in the bar; `variant: 'menu'`
+       * opens `menuContent` (the existing UsagePanel). No custom `render`, so
+       * the host's own menu chrome is used instead of a bespoke popover. */
       data: {
         id: 'provider-usage',
-        label: 'Usage',
-        variant: 'text'
+        label: jsx(BarDetail, {}),
+        variant: 'menu',
+        menuClassName: 'w-[24rem]',
+        menuAlign: 'center',
+        toggleLabel: 'Provider usage',
+        menuContent: () => jsx(UsagePanel, {})
       }
     })
   }

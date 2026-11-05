@@ -455,31 +455,37 @@ function BarMenu() {
 
 const MONO = 'tabular-nums'
 
-function Row({ label, value, width, meta, warn, eta }) {
-  const raw = Number(width)
+/* One grid shared by quota windows and spend rows:
+ * [label 96px] [flex bar] [value 72px] [meta 76px]. Fixed columns keep the
+ * left labels, right numbers and reset notes aligned across every provider. */
+function UsageRow({ label, value, meta, barWidth, warn, eta }) {
+  const raw = Number(barWidth)
   const w = isFinite(raw) && raw > 0 ? Math.max(3, Math.min(100, raw)) : 0
   return jsxs('div', {
-    style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flexWrap: 'nowrap', padding: '2px 4px', margin: '0 -4px', borderRadius: 5 },
+    style: { display: 'flex', alignItems: 'center', gap: 4, minWidth: 0, flexWrap: 'nowrap', padding: 0 },
     children: [
       jsx('span', {
-        style: { flex: '1 1 auto', minWidth: 0, textAlign: 'left', fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+        style: { flex: '0 0 96px', textAlign: 'left', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: 12, opacity: 0.75 },
         children: label
       }),
       jsx('span', {
-        style: { flex: '1 1 auto', minWidth: 40, height: 3, borderRadius: 3, background: 'var(--ui-stroke-tertiary, rgba(128,132,144,.25))', overflow: 'hidden' },
+        style: { flex: '1 1 auto', minWidth: 0 },
         children: w > 0
           ? jsx('span', {
-              style: { display: 'block', height: '100%', width: w + '%', borderRadius: 3, background: 'var(--ui-accent, #6f9dff)', opacity: 0.9 }
+              style: { display: 'block', height: 3, borderRadius: 3, background: 'var(--ui-stroke-tertiary, rgba(128,132,144,.25))', overflow: 'hidden' },
+              children: jsx('span', {
+                style: { display: 'block', height: '100%', width: w + '%', borderRadius: 3, background: 'var(--ui-accent, #6f9dff)', opacity: 0.9 }
+              })
             })
           : null
       }),
       jsx('span', {
-        style: { flex: '0 0 auto', textAlign: 'right', fontWeight: 600, fontSize: 12, fontVariantNumeric: MONO, whiteSpace: 'nowrap' },
+        style: { flex: '0 0 72px', textAlign: 'right', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums', fontWeight: 600, fontSize: 12 },
         className: warn ? 'text-amber-600' : undefined,
         children: value
       }),
       jsx('span', {
-        style: { flex: '0 0 auto', textAlign: 'right', fontSize: 11, opacity: 0.7, fontVariantNumeric: MONO, whiteSpace: 'nowrap' },
+        style: { flex: '0 0 76px', textAlign: 'right', whiteSpace: 'nowrap', fontSize: 11, opacity: 0.6, fontVariantNumeric: 'tabular-nums' },
         children: eta
           ? [meta, jsx('span', { key: 'eta', className: 'text-amber-600', style: { marginLeft: 4 }, children: eta })]
           : meta
@@ -532,34 +538,23 @@ function SpendRows({ spend }) {
   const rows = spend.rows || []
   const out = rows.map(row => {
     const amount = row.amount === null ? '—' : money(row.amount, spend.cur)
-    return jsxs('div', {
+    return jsx(UsageRow, {
       key: row.key,
-      style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flexWrap: 'nowrap', padding: '2px 4px' },
-      children: [
-        jsx('span', {
-          style: { flex: '1 1 auto', minWidth: 0, textAlign: 'left', fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
-          children: row.label
-        }),
-        jsx('span', {
-          style: { flex: '0 0 auto', textAlign: 'right', fontSize: 12, fontWeight: 600, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
-          children: amount
-        }),
-        jsx('span', {
-          style: { flex: '0 0 auto', textAlign: 'right', fontSize: 11, opacity: 0.7, whiteSpace: 'nowrap' },
-          children: row.topup ? 'top-up' : ''
-        })
-      ]
+      label: row.label,
+      value: amount,
+      meta: row.topup ? 'top-up' : '',
+      barWidth: 0
     })
   })
   if (rows.some(row => row.partial === true)) {
     out.push(jsx('div', {
       key: 'note',
-      style: { padding: '3px 4px 0', fontSize: 11, opacity: 0.5, whiteSpace: 'nowrap' },
+      style: { padding: '3px 0 0', fontSize: 11, opacity: 0.5, whiteSpace: 'nowrap' },
       children: 'counted from ' + trackedFrom(spend.tracking_since)
     }))
   }
   return jsxs('div', {
-    style: { display: 'flex', flexDirection: 'column', marginTop: 1 },
+    style: { display: 'flex', flexDirection: 'column', gap: 4 },
     children: out
   })
 }
@@ -583,11 +578,11 @@ function ProviderBlock({ p, first, mode, ids }) {
     const usedPct = usedPercentOf(w)
     const shown = used ? usedPct : 100 - usedPct
     const aEta = actionableEta(w)
-    rows.push(jsx(Row, {
+    rows.push(jsx(UsageRow, {
       key: 'w' + w.label,
       label: w.label,
       value: pct(shown),
-      width: shown,
+      barWidth: shown,
       meta: etaText(w.resets_at),
       warn: usedPct >= WARN_PCT,
       eta: aEta ? fmtEta(aEta) : null
@@ -599,11 +594,11 @@ function ProviderBlock({ p, first, mode, ids }) {
     const shown = total > 0 ? (used ? Math.max(0, total - left) : left) : left
     const d = Number(m.depletes_in_seconds)
     const aEta = isFinite(d) && d > 0 && d < 14 * 86400 ? d : null
-    rows.push(jsx(Row, {
+    rows.push(jsx(UsageRow, {
       key: 'm' + m.label,
       label: used && total > 0 ? (MONEY_LABEL_USED[m.label] || m.label) : m.label,
       value: money(shown, m.cur),
-      width: total > 0 ? (shown / total) * 100 : 0,
+      barWidth: total > 0 ? (shown / total) * 100 : 0,
       meta: total > 0 ? '/ ' + money(total, m.cur) : '',
       warn: m.label === 'Key cap' && capUsedPercent(m) >= WARN_PCT,
       eta: aEta ? fmtEta(aEta) : null
@@ -614,13 +609,13 @@ function ProviderBlock({ p, first, mode, ids }) {
   }
   return jsxs('div', {
     style: {
-      display: 'flex', flexDirection: 'column', gap: 3,
+      display: 'flex', flexDirection: 'column', gap: 4,
       borderTop: first ? 'none' : '1px solid var(--ui-stroke-tertiary, #3a3f4a)',
       paddingTop: first ? 0 : 6
     },
     children: [
       jsxs('div', {
-        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, minWidth: 0, flexWrap: 'nowrap', marginBottom: 1 },
+        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 4, minWidth: 0, flexWrap: 'nowrap', padding: 0 },
         children: [
           jsxs('span', {
             style: { display: 'inline-flex', alignItems: 'center', gap: 1, minWidth: 0, flexShrink: 1 },
