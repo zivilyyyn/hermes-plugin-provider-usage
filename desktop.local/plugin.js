@@ -6,7 +6,7 @@
  * so provider credentials stay on the local machine.
  *
  * Each provider header carries an eye toggle that shows/hides that provider
- * in the status bar; until one is touched, only the first provider shows.
+ * in the status bar; until one is touched, every provider shows.
  *
  * Registered as a DATA contribution, so the app renders it with the exact
  * same chrome as the core context-usage gauge; `variant: 'menu'` opens the
@@ -51,8 +51,8 @@ const INTERVALS = [
  * (namespaced under hermes.plugin.provider-usage.*) so they survive restarts. */
 const $interval = atom(300000)
 const $mode = atom('used') // 'used' | 'remaining'
-/* Which providers appear in the status bar. null = default (first provider
- * only); an array of ids = an explicit choice from the panel's eye toggles. */
+/* Which providers appear in the status bar. null = default (every provider);
+ * an array of ids = an explicit choice from the panel's eye toggles. */
 const $barProviders = atom(null)
 
 const STORE_INTERVAL = 'intervalMs'
@@ -166,17 +166,17 @@ function providerWarn(p) {
   return false
 }
 
-/* Bar visibility: default is the FIRST provider only (provider list order);
- * once the user touches a toggle, an explicit id list decides. */
+/* Bar visibility: all providers show by default (provider list order); once
+ * the user touches a toggle, an explicit id list decides. */
 function barVisible(set, id, ids) {
   if (!Array.isArray(ids)) return false
-  if (set === null) return ids.length > 0 && ids[0] === id
+  if (set === null) return ids.indexOf(id) !== -1
   return set.indexOf(id) !== -1
 }
 
 function toggleBarProvider(id, ids) {
   const cur = $barProviders.get()
-  const effective = cur === null ? (ids.length ? [ids[0]] : []) : cur.slice()
+  const effective = cur === null ? ids.slice() : cur.slice()
   const next = effective.indexOf(id) === -1 ? effective.concat([id]) : effective.filter(x => x !== id)
   $barProviders.set(next)
 }
@@ -299,7 +299,7 @@ function BarDetail() {
   if (!data) return '…'
   const provs = data.providers || []
   const visible = barSet === null
-    ? provs.slice(0, 1)
+    ? provs
     : provs.filter(p => barSet.indexOf(p.id) !== -1)
   const parts = []
   visible.forEach((p, i) => {
@@ -459,10 +459,10 @@ function Row({ label, value, width, meta, warn, eta }) {
   const raw = Number(width)
   const w = isFinite(raw) && raw > 0 ? Math.max(3, Math.min(100, raw)) : 0
   return jsxs('div', {
-    style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, padding: '2px 4px', margin: '0 -4px', borderRadius: 5 },
+    style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flexWrap: 'nowrap', padding: '2px 4px', margin: '0 -4px', borderRadius: 5 },
     children: [
       jsx('span', {
-        style: { minWidth: 88, flex: 'none', fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+        style: { minWidth: 88, flex: '0 1 auto', flexShrink: 1, fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
         children: label
       }),
       jsx('span', {
@@ -474,12 +474,12 @@ function Row({ label, value, width, meta, warn, eta }) {
           : null
       }),
       jsx('span', {
-        style: { width: 48, flex: 'none', textAlign: 'right', fontWeight: 600, fontSize: 12, fontVariantNumeric: MONO },
+        style: { flexShrink: 0, minWidth: 0, textAlign: 'right', fontWeight: 600, fontSize: 12, fontVariantNumeric: MONO, whiteSpace: 'nowrap' },
         className: warn ? 'text-amber-600' : undefined,
         children: value
       }),
       jsx('span', {
-        style: { width: 112, flex: 'none', textAlign: 'right', fontSize: 11, opacity: 0.7, fontVariantNumeric: MONO, whiteSpace: 'nowrap' },
+        style: { flexShrink: 0, minWidth: 0, textAlign: 'right', fontSize: 11, opacity: 0.7, fontVariantNumeric: MONO, whiteSpace: 'nowrap' },
         children: eta
           ? [meta, jsx('span', { key: 'eta', className: 'text-amber-600', style: { marginLeft: 4 }, children: eta })]
           : meta
@@ -534,19 +534,19 @@ function SpendRows({ spend }) {
     const amount = row.amount === null ? '—' : money(row.amount, spend.cur)
     return jsxs('div', {
       key: row.key,
-      style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, padding: '2px 4px' },
+      style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flexWrap: 'nowrap', padding: '2px 4px' },
       children: [
         jsx('span', {
-          style: { minWidth: 88, flex: 'none', fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap' },
+          style: { minWidth: 88, flex: '0 1 auto', flexShrink: 1, fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
           children: row.label
         }),
         jsx('span', { style: { flex: '1 1 auto' } }),
         jsx('span', {
-          style: { flex: '0 0 auto', textAlign: 'right', fontSize: 12, fontWeight: 600, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
+          style: { flexShrink: 0, minWidth: 0, textAlign: 'right', fontSize: 12, fontWeight: 600, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
           children: amount
         }),
         jsx('span', {
-          style: { width: 112, flex: 'none', textAlign: 'right', fontSize: 11, opacity: 0.7, whiteSpace: 'nowrap' },
+          style: { flexShrink: 0, minWidth: 0, textAlign: 'right', fontSize: 11, opacity: 0.7, whiteSpace: 'nowrap' },
           children: row.topup ? 'top-up' : ''
         })
       ]
@@ -621,16 +621,16 @@ function ProviderBlock({ p, first, mode, ids }) {
     },
     children: [
       jsxs('div', {
-        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 1 },
+        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, minWidth: 0, flexWrap: 'nowrap', marginBottom: 1 },
         children: [
           jsxs('span', {
-            style: { display: 'inline-flex', alignItems: 'center', gap: 1 },
+            style: { display: 'inline-flex', alignItems: 'center', gap: 1, minWidth: 0, flexShrink: 1 },
             children: [
               jsx(BarToggle, { p, ids }),
-              jsx('span', { style: { fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.75 }, children: p.name })
+              jsx('span', { style: { minWidth: 0, fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.75, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, children: p.name })
             ]
           }),
-          jsx('span', { style: { fontSize: 11, opacity: 0.6 }, children: p.tag || '' })
+          jsx('span', { style: { fontSize: 11, opacity: 0.6, flexShrink: 0, whiteSpace: 'nowrap' }, children: p.tag || '' })
         ]
       }),
       ...rows
@@ -680,15 +680,15 @@ function IntervalSelect({ onChanged }) {
 
   return jsxs('span', {
     ref: wrapRef,
-    style: { position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 5 },
+    style: { position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 5, minWidth: 0, flexShrink: 1 },
     children: [
-      jsx('span', { style: { opacity: 0.7 }, children: 'auto refresh' }),
+      jsx('span', { style: { opacity: 0.7, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, children: 'auto refresh' }),
       jsxs('button', {
         type: 'button',
         onClick: () => setOpen(v => !v),
         title: 'Refresh interval',
         style: {
-          display: 'inline-flex', alignItems: 'center', gap: 3, padding: '1px 6px', fontSize: 11, lineHeight: '16px',
+          display: 'inline-flex', alignItems: 'center', gap: 3, padding: '1px 6px', fontSize: 11, lineHeight: '16px', flexShrink: 0,
           border: '1px solid var(--ui-stroke-tertiary, #3a3f4a)', borderRadius: 5, background: 'transparent',
           color: 'inherit', cursor: 'pointer'
         },
@@ -765,18 +765,18 @@ function UsagePanel() {
   }
 
   return jsxs('div', {
-    style: { display: 'flex', width: 340, minWidth: 320, maxWidth: 380, boxSizing: 'border-box', flexDirection: 'column', gap: 9, padding: '11px 12px 10px', fontSize: 12 },
+    style: { display: 'flex', width: '100%', maxWidth: 380, boxSizing: 'border-box', flexDirection: 'column', gap: 9, padding: '11px 12px 10px', fontSize: 12 },
     children: [
       jsx('style', { key: 'kf', children: '@keyframes hermes-usage-spin{to{transform:rotate(360deg)}}' }),
       jsxs('div', {
         key: 'head',
-        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, minWidth: 0, flexWrap: 'nowrap' },
         children: [
-          jsx('span', { style: { fontSize: 12, fontWeight: 650 }, children: 'Provider Usage' }),
+          jsx('span', { style: { fontSize: 12, fontWeight: 650, flexShrink: 0, whiteSpace: 'nowrap' }, children: 'Provider Usage' }),
           jsxs('span', {
-            style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, opacity: 0.75 },
+            style: { display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0, flexShrink: 1, fontSize: 11, opacity: 0.75 },
             children: [
-              jsx('span', { style: { fontVariantNumeric: MONO }, children: stamp }),
+              jsx('span', { style: { minWidth: 0, fontVariantNumeric: MONO, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, children: stamp }),
               jsx('button', {
                 type: 'button',
                 onClick: refresh,
@@ -807,7 +807,7 @@ function UsagePanel() {
       jsxs('div', {
         key: 'foot',
         style: {
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, minWidth: 0, flexWrap: 'nowrap',
           borderTop: '1px solid var(--ui-stroke-tertiary, #3a3f4a)', paddingTop: 6, fontSize: 11
         },
         children: [
