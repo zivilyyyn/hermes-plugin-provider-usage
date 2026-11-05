@@ -469,13 +469,10 @@ function UsageRow({ label, value, meta, barWidth, warn, eta }) {
         children: label
       }),
       jsx('span', {
-        style: { flex: '1 1 auto', minWidth: 0 },
+        style: { flex: '1 1 auto', minWidth: 40, height: 3, borderRadius: 3, background: 'var(--ui-stroke-tertiary, rgba(128,132,144,.25))', overflow: 'hidden', display: 'block' },
         children: w > 0
           ? jsx('span', {
-              style: { display: 'block', height: 3, borderRadius: 3, background: 'var(--ui-stroke-tertiary, rgba(128,132,144,.25))', overflow: 'hidden' },
-              children: jsx('span', {
-                style: { display: 'block', height: '100%', width: w + '%', borderRadius: 3, background: 'var(--ui-accent, #6f9dff)', opacity: 0.9 }
-              })
+              style: { display: 'block', height: '100%', width: w + '%', borderRadius: 3, background: 'var(--ui-accent, #6f9dff)', opacity: 0.9 }
             })
           : null
       }),
@@ -598,7 +595,7 @@ function ProviderBlock({ p, first, mode, ids }) {
       key: 'm' + m.label,
       label: used && total > 0 ? (MONEY_LABEL_USED[m.label] || m.label) : m.label,
       value: money(shown, m.cur),
-      barWidth: total > 0 ? (shown / total) * 100 : 0,
+      barWidth: 0,
       meta: total > 0 ? '/ ' + money(total, m.cur) : '',
       warn: m.label === 'Key cap' && capUsedPercent(m) >= WARN_PCT,
       eta: aEta ? fmtEta(aEta) : null
