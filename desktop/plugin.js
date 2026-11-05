@@ -852,16 +852,14 @@ export default {
       id: 'status',
       area: STATUSBAR_AREAS.right,
       order: 40,
-      /* A DATA item that carries its own `render`: the host's statusbar takes
-       * the render path (item.render) for chrome/state/tooltip, while `id` and
-       * `toggleLabel` still ship inside the payload — that is what keeps the
-       * bar's right-click show/hide list (and the saved hidden-id) working.
+      /* 状态栏项（顶层 render），不是 DATA 项：render 直接交给宿主，走状态栏
+       * 自己的 chrome，和核心上下文用量那条一致，不再被 DATA 项的 chrome 覆盖。
+       * 顶层 toggleLabel 仍用于右键显示/隐藏列表及保存的隐藏 id。
+       * A statusbar item with a top-level `render` (not a DATA item): the host
+       * uses its own statusbar chrome, same as the core context-usage item.
        * No `title`, so the host renders no hover tooltip for this item. */
-      data: {
-        id: 'provider-usage',
-        render: () => jsx(BarMenu, {}),
-        toggleLabel: 'Provider usage'
-      }
+      render: () => jsx(BarMenu, {}),
+      toggleLabel: 'Provider usage'
     })
   }
 }
