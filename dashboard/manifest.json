@@ -3,6 +3,11 @@
   "label": "Provider Usage",
   "description": "Backend router for the Provider Usage desktop status-bar plugin.",
   "version": "0.3.1",
-  "tab": { "hidden": true },
+  "icon": "Activity",
+  "tab": {
+    "path": "/provider-usage",
+    "position": "end"
+  },
+  "entry": "dist/index.js",
   "api": "plugin_api.py"
 }
