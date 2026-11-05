@@ -683,12 +683,8 @@ export default {
        * (the existing UsagePanel); no custom `render` is supplied. */
       data: {
         id: 'provider-usage',
-        icon: 'activity',
         label: 'Usage',
-        variant: 'menu',
-        menuAlign: 'end',
-        toggleLabel: 'Provider usage',
-        menuContent: () => jsx(UsagePanel, {})
+        variant: 'text'
       }
     })
   }
