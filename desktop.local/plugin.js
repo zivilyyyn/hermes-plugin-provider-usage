@@ -442,6 +442,7 @@ function BarMenu() {
         onMouseEnter: clearTimers,
         onMouseLeave: hoverClose,
         style: {
+          width: 384,
           maxHeight: 'min(70vh, var(--radix-popover-content-available-height, 70vh))',
           overflowY: 'auto'
         },
@@ -839,24 +840,41 @@ export default {
     } catch (e) {
       rest = null
     }
-    ctx.register({
-      id: 'provider-usage-status',
-      area: STATUSBAR_AREAS.right,
-      order: 40,
-      /* A DATA item: the host renders the native statusbar chrome/menu and
-       * keeps `toggleLabel` for the right-click show/hide list. `label` keeps
-       * the live KIMI 5h / DeepSeek balance text in the bar; `variant: 'menu'`
-       * opens `menuContent` (the existing UsagePanel). No custom `render`, so
-       * the host's own menu chrome is used instead of a bespoke popover. */
-      data: {
-        id: 'provider-usage',
-        label: jsx(BarDetail, {}),
-        variant: 'menu',
-        menuClassName: 'w-[24rem]',
-        menuAlign: 'center',
-        toggleLabel: 'Provider usage',
-        menuContent: () => jsx(UsagePanel, {})
-      }
-    })
+    /* Electron keeps the original self-drawn popover (`BarMenu`); the browser
+     * build uses the host's data/menu chrome. Both mount the same `UsagePanel`
+     * and keep `toggleLabel` for the right-click show/hide list. */
+    const isElectron = typeof navigator !== 'undefined' && /Electron/i.test(navigator.userAgent)
+    if (isElectron) {
+      ctx.register({
+        id: 'provider-usage-status',
+        area: STATUSBAR_AREAS.right,
+        order: 40,
+        data: {
+          id: 'provider-usage',
+          render: () => jsx(BarMenu, {}),
+          toggleLabel: 'Provider usage'
+        }
+      })
+    } else {
+      ctx.register({
+        id: 'provider-usage-status',
+        area: STATUSBAR_AREAS.right,
+        order: 40,
+        /* A DATA item: the host renders the native statusbar chrome/menu and
+         * keeps `toggleLabel` for the right-click show/hide list. `label` keeps
+         * the live KIMI 5h / DeepSeek balance text in the bar; `variant: 'menu'`
+         * opens `menuContent` (the existing UsagePanel). No custom `render`, so
+         * the host's own menu chrome is used instead of a bespoke popover. */
+        data: {
+          id: 'provider-usage',
+          label: jsx(BarDetail, {}),
+          variant: 'menu',
+          menuClassName: 'w-[24rem]',
+          menuAlign: 'center',
+          toggleLabel: 'Provider usage',
+          menuContent: () => jsx(UsagePanel, {})
+        }
+      })
+    }
   }
 }
