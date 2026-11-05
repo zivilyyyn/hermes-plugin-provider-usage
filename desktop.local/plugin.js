@@ -469,13 +469,10 @@ function UsageRow({ label, value, meta, barWidth, warn, eta }) {
         children: label
       }),
       jsx('span', {
-        style: { flex: '1 1 auto', minWidth: 0 },
+        style: { flex: '1 1 auto', minWidth: 40, height: 3, borderRadius: 3, background: 'var(--ui-stroke-tertiary, rgba(128,132,144,.25))', overflow: 'hidden', display: 'block' },
         children: w > 0
           ? jsx('span', {
-              style: { display: 'block', height: 3, borderRadius: 3, background: 'var(--ui-stroke-tertiary, rgba(128,132,144,.25))', overflow: 'hidden' },
-              children: jsx('span', {
-                style: { display: 'block', height: '100%', width: w + '%', borderRadius: 3, background: 'var(--ui-accent, #6f9dff)', opacity: 0.9 }
-              })
+              style: { display: 'block', height: '100%', width: w + '%', borderRadius: 3, background: 'var(--ui-accent, #6f9dff)', opacity: 0.9 }
             })
           : null
       }),
