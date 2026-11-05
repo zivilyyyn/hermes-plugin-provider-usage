@@ -8,14 +8,16 @@
  * Each provider header carries an eye toggle that shows/hides that provider
  * in the status bar; until one is touched, only the first provider shows.
  *
- * Registered as a DATA contribution, so the app renders it with the exact
- * same chrome as the core context-usage gauge; `variant: 'menu'` opens the
- * popover: dense per-provider rows, a Used/Remaining value selector
- * (bottom-right, instant) and a refresh-interval picker (30s/1m/5m/10m).
+ * Registered as a DATA contribution (no custom `render`), so the whole
+ * `data` object is the StatusbarItem and the host keeps `toggleLabel` for
+ * the right-click show/hide list. `variant: 'menu'` opens `menuContent`
+ * through the host's native menu chrome: dense per-provider rows, a
+ * Used/Remaining value selector (bottom-right, instant) and a
+ * refresh-interval picker (30s/1m/5m/10m).
  * Every scheduled poll refreshes the underlying values (?fresh=1).
  *
  * Near-limit tint: any window or the OpenRouter key cap at >= 80% used
- * renders amber in the bar and in the popover rows.
+ * renders amber in the popover rows.
  *
  * Native notification (ctx.os.notify) fires once per threshold crossing,
  * deduped per window cycle (keyed by reset time) and per day for the cap.
@@ -25,9 +27,6 @@
  * window would hit 100% before its reset (or a cap depletes soon).
  */
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
   STATUSBAR_AREAS,
   atom,
   useQuery,
@@ -282,173 +281,6 @@ function summary(p, mode) {
   const win = wins.find(w => w.label === '5h') || wins[0]
   const u = usedPercentOf(win)
   return Math.round(used ? u : 100 - u) + '%'
-}
-
-/* ---------- bar item (live) ---------- */
-
-function BarDetail() {
-  const { data, isError } = useUsage()
-  const mode = useValue($mode)
-  const barSet = useValue($barProviders)
-
-  useEffect(() => {
-    if (data) checkAlerts(data)
-  }, [data])
-
-  if (isError) return 'backend down'
-  if (!data) return '…'
-  const provs = data.providers || []
-  const visible = barSet === null
-    ? provs.slice(0, 1)
-    : provs.filter(p => barSet.indexOf(p.id) !== -1)
-  const parts = []
-  visible.forEach((p, i) => {
-    if (i) parts.push(' · ')
-    parts.push(jsx('span', {
-      key: p.id,
-      className: providerWarn(p) ? 'text-amber-600' : undefined,
-      children: code(p) + ' ' + summary(p, mode)
-    }))
-  })
-  // The host renders plugin detail content in text-muted-foreground/80 (a
-  // double-dimmed tone); force the same token built-in statusbar values use.
-  return jsx('span', { style: { color: 'var(--ui-text-tertiary)' }, children: parts })
-}
-
-/* ---------- bar item: hover-open / click-pin popover ---------- */
-
-const HOVER_OPEN_MS = 300
-const HOVER_CLOSE_MS = 200
-
-// The chrome the host gives a plain statusbar button (statusbar-controls.tsx
-// STATUSBAR_ACTION_CLASS). These exact utilities are already in the compiled
-// stylesheet because the host's own bar uses them, so the item looks the same
-// as it did as a declarative data contribution.
-const BAR_BUTTON_CLASS =
-  'inline-flex h-full items-center gap-1 rounded-none px-1.5 text-[0.6875rem] text-(--ui-text-tertiary) ' +
-  'transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground'
-
-/* The statusbar item owns its popover instead of the host's menu chrome:
- * hovering the item opens the very same UsagePanel after a short intent
- * delay, moving into the panel keeps it open, leaving both closes after a
- * second delay, and a click pins it open. No `title` is registered anywhere,
- * so the host never paints its hover tooltip over this item. */
-function BarMenu() {
-  const [open, setOpen] = useState(false)
-  const pinned = useRef(false)
-  const openTimer = useRef(null)
-  const closeTimer = useRef(null)
-
-  const clearTimers = () => {
-    if (openTimer.current !== null) {
-      clearTimeout(openTimer.current)
-      openTimer.current = null
-    }
-    if (closeTimer.current !== null) {
-      clearTimeout(closeTimer.current)
-      closeTimer.current = null
-    }
-  }
-
-  useEffect(() => clearTimers, [])
-
-  const hoverOpen = () => {
-    clearTimers()
-    if (open) return
-    openTimer.current = setTimeout(() => {
-      openTimer.current = null
-      setOpen(true)
-    }, HOVER_OPEN_MS)
-  }
-
-  const hoverClose = () => {
-    clearTimers()
-    if (pinned.current) return
-    closeTimer.current = setTimeout(() => {
-      closeTimer.current = null
-      setOpen(false)
-    }, HOVER_CLOSE_MS)
-  }
-
-  const close = () => {
-    clearTimers()
-    pinned.current = false
-    setOpen(false)
-  }
-
-  /* State is owned here, not by Radix: its own trigger toggle is ignored below
-   * so a hover-opened panel and a click can never fight over `open` inside the
-   * same event. A click pins an un-pinned item (or unpins a pinned one); an
-   * outside press that is not this item, or Escape, closes it. */
-  const onTriggerClick = () => {
-    clearTimers()
-    if (pinned.current) {
-      close()
-      return
-    }
-    pinned.current = true
-    setOpen(true)
-  }
-
-  /* Outside presses are judged here rather than by Radix's own dismissal: the
-   * item and the panel tag themselves, so a press on either is not "outside",
-   * while any other press — the composer included — closes and unpins. */
-  useEffect(() => {
-    if (!open) return undefined
-    const onPointerDown = event => {
-      const target = event.target
-      if (!target || typeof target.closest !== 'function') return
-      if (target.closest('[data-provider-usage-trigger], [data-provider-usage-panel]')) return
-      close()
-    }
-    document.addEventListener('pointerdown', onPointerDown, true)
-    return () => document.removeEventListener('pointerdown', onPointerDown, true)
-  }, [open])
-
-  return jsxs(Popover, {
-    open,
-    // Radix's dismissal requests are answered by the explicit handlers below;
-    // letting it drive `open` too would race the hover timers.
-    onOpenChange: () => {},
-    children: [
-      jsx(PopoverTrigger, {
-        key: 'trigger',
-        asChild: true,
-        children: jsx('button', {
-          type: 'button',
-          className: BAR_BUTTON_CLASS,
-          'aria-label': 'Provider usage',
-          'data-provider-usage-trigger': '',
-          onClick: onTriggerClick,
-          onMouseEnter: hoverOpen,
-          onMouseLeave: hoverClose,
-          children: [
-            ICON,
-            jsx('span', { className: 'truncate text-muted-foreground/80', children: jsx(BarDetail, {}) })
-          ]
-        })
-      }),
-      jsx(PopoverContent, {
-        key: 'content',
-        variant: 'menu',
-        side: 'top',
-        align: 'end',
-        sideOffset: 8,
-        className: 'p-0',
-        'data-provider-usage-panel': '',
-        // Hover-opening must never pull keyboard focus out of the composer.
-        onOpenAutoFocus: event => event.preventDefault(),
-        onEscapeKeyDown: close,
-        onMouseEnter: clearTimers,
-        onMouseLeave: hoverClose,
-        style: {
-          maxHeight: 'min(70vh, var(--radix-popover-content-available-height, 70vh))',
-          overflowY: 'auto'
-        },
-        children: jsx(UsagePanel, {})
-      })
-    ]
-  })
 }
 
 /* ---------- popover panel ---------- */
@@ -739,6 +571,10 @@ function UsagePanel() {
   const mode = useValue($mode)
   const [spinning, setSpinning] = useState(false)
 
+  useEffect(() => {
+    if (data) checkAlerts(data)
+  }, [data])
+
   const refresh = () => {
     if (spinning) return
     setSpinning(true)
@@ -821,17 +657,6 @@ function UsagePanel() {
 
 /* ---------- registration ---------- */
 
-const ICON = jsx('svg', {
-  viewBox: '0 0 24 24',
-  fill: 'none',
-  stroke: 'currentColor',
-  strokeWidth: 2,
-  strokeLinecap: 'round',
-  strokeLinejoin: 'round',
-  style: { width: 12, height: 12, display: 'block' },
-  children: [jsx('path', { d: 'm12 14 4-4' }), jsx('path', { d: 'M3.34 19a10 10 0 1 1 17.32 0' })]
-})
-
 export default {
   id: 'provider-usage',
   name: 'Provider Usage',
@@ -849,17 +674,22 @@ export default {
       rest = null
     }
     ctx.register({
-      id: 'status',
+      id: 'provider-usage-status',
       area: STATUSBAR_AREAS.right,
       order: 40,
-      /* 状态栏项（顶层 render），不是 DATA 项：render 直接交给宿主，走状态栏
-       * 自己的 chrome，和核心上下文用量那条一致，不再被 DATA 项的 chrome 覆盖。
-       * 顶层 toggleLabel 仍用于右键显示/隐藏列表及保存的隐藏 id。
-       * A statusbar item with a top-level `render` (not a DATA item): the host
-       * uses its own statusbar chrome, same as the core context-usage item.
-       * No `title`, so the host renders no hover tooltip for this item. */
-      render: () => jsx(BarMenu, {}),
-      toggleLabel: 'Provider usage'
+      /* DATA contribution: the whole `data` object is the StatusbarItem, so
+       * the host renders its native chrome/menu and keeps `toggleLabel` for
+       * the right-click show/hide list. `variant: 'menu'` opens `menuContent`
+       * (the existing UsagePanel); no custom `render` is supplied. */
+      data: {
+        id: 'provider-usage',
+        icon: 'activity',
+        label: 'Usage',
+        variant: 'menu',
+        menuAlign: 'end',
+        toggleLabel: 'Provider usage',
+        menuContent: () => jsx(UsagePanel, {})
+      }
     })
   }
 }
