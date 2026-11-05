@@ -462,11 +462,11 @@ function Row({ label, value, width, meta, warn, eta }) {
     style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flexWrap: 'nowrap', padding: '2px 4px', margin: '0 -4px', borderRadius: 5 },
     children: [
       jsx('span', {
-        style: { minWidth: 88, flex: '0 1 auto', flexShrink: 1, fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+        style: { flex: '1 1 auto', minWidth: 0, textAlign: 'left', fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
         children: label
       }),
       jsx('span', {
-        style: { flex: '1 1 auto', height: 3, borderRadius: 3, background: 'var(--ui-stroke-tertiary, rgba(128,132,144,.25))', overflow: 'hidden' },
+        style: { flex: '1 1 auto', minWidth: 40, height: 3, borderRadius: 3, background: 'var(--ui-stroke-tertiary, rgba(128,132,144,.25))', overflow: 'hidden' },
         children: w > 0
           ? jsx('span', {
               style: { display: 'block', height: '100%', width: w + '%', borderRadius: 3, background: 'var(--ui-accent, #6f9dff)', opacity: 0.9 }
@@ -474,12 +474,12 @@ function Row({ label, value, width, meta, warn, eta }) {
           : null
       }),
       jsx('span', {
-        style: { flexShrink: 0, minWidth: 0, textAlign: 'right', fontWeight: 600, fontSize: 12, fontVariantNumeric: MONO, whiteSpace: 'nowrap' },
+        style: { flex: '0 0 auto', textAlign: 'right', fontWeight: 600, fontSize: 12, fontVariantNumeric: MONO, whiteSpace: 'nowrap' },
         className: warn ? 'text-amber-600' : undefined,
         children: value
       }),
       jsx('span', {
-        style: { flexShrink: 0, minWidth: 0, textAlign: 'right', fontSize: 11, opacity: 0.7, fontVariantNumeric: MONO, whiteSpace: 'nowrap' },
+        style: { flex: '0 0 auto', textAlign: 'right', fontSize: 11, opacity: 0.7, fontVariantNumeric: MONO, whiteSpace: 'nowrap' },
         children: eta
           ? [meta, jsx('span', { key: 'eta', className: 'text-amber-600', style: { marginLeft: 4 }, children: eta })]
           : meta
@@ -537,16 +537,15 @@ function SpendRows({ spend }) {
       style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flexWrap: 'nowrap', padding: '2px 4px' },
       children: [
         jsx('span', {
-          style: { minWidth: 88, flex: '0 1 auto', flexShrink: 1, fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+          style: { flex: '1 1 auto', minWidth: 0, textAlign: 'left', fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
           children: row.label
         }),
-        jsx('span', { style: { flex: '1 1 auto' } }),
         jsx('span', {
-          style: { flexShrink: 0, minWidth: 0, textAlign: 'right', fontSize: 12, fontWeight: 600, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
+          style: { flex: '0 0 auto', textAlign: 'right', fontSize: 12, fontWeight: 600, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
           children: amount
         }),
         jsx('span', {
-          style: { flexShrink: 0, minWidth: 0, textAlign: 'right', fontSize: 11, opacity: 0.7, whiteSpace: 'nowrap' },
+          style: { flex: '0 0 auto', textAlign: 'right', fontSize: 11, opacity: 0.7, whiteSpace: 'nowrap' },
           children: row.topup ? 'top-up' : ''
         })
       ]
@@ -627,10 +626,10 @@ function ProviderBlock({ p, first, mode, ids }) {
             style: { display: 'inline-flex', alignItems: 'center', gap: 1, minWidth: 0, flexShrink: 1 },
             children: [
               jsx(BarToggle, { p, ids }),
-              jsx('span', { style: { minWidth: 0, fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.75, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, children: p.name })
+              jsx('span', { style: { minWidth: 0, textAlign: 'left', fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.75, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, children: p.name })
             ]
           }),
-          jsx('span', { style: { fontSize: 11, opacity: 0.6, flexShrink: 0, whiteSpace: 'nowrap' }, children: p.tag || '' })
+          jsx('span', { style: { textAlign: 'right', fontSize: 11, opacity: 0.6, flexShrink: 0, whiteSpace: 'nowrap' }, children: p.tag || '' })
         ]
       }),
       ...rows
@@ -765,7 +764,7 @@ function UsagePanel() {
   }
 
   return jsxs('div', {
-    style: { display: 'flex', width: '100%', maxWidth: 380, boxSizing: 'border-box', flexDirection: 'column', gap: 9, padding: '11px 12px 10px', fontSize: 12 },
+    style: { display: 'flex', width: '100%', maxWidth: 460, boxSizing: 'border-box', flexDirection: 'column', gap: 9, padding: '11px 12px 10px', fontSize: 12 },
     children: [
       jsx('style', { key: 'kf', children: '@keyframes hermes-usage-spin{to{transform:rotate(360deg)}}' }),
       jsxs('div', {
@@ -861,6 +860,7 @@ export default {
         id: 'provider-usage',
         label: jsx(BarDetail, {}),
         variant: 'menu',
+        menuClassName: 'w-[24rem]',
         menuAlign: 'center',
         toggleLabel: 'Provider usage',
         menuContent: () => jsx(UsagePanel, {})
