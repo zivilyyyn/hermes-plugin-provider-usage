@@ -595,7 +595,7 @@ function ProviderBlock({ p, first, mode, ids }) {
       key: 'm' + m.label,
       label: used && total > 0 ? (MONEY_LABEL_USED[m.label] || m.label) : m.label,
       value: money(shown, m.cur),
-      barWidth: total > 0 ? (shown / total) * 100 : 0,
+      barWidth: 0,
       meta: total > 0 ? '/ ' + money(total, m.cur) : '',
       warn: m.label === 'Key cap' && capUsedPercent(m) >= WARN_PCT,
       eta: aEta ? fmtEta(aEta) : null
